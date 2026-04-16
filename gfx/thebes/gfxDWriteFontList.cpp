@@ -382,7 +382,10 @@ gfxFontEntry* gfxDWriteFontEntry::Clone() const {
   return fe;
 }
 
-gfxDWriteFontEntry::~gfxDWriteFontEntry() {}
+gfxDWriteFontEntry::~gfxDWriteFontEntry() {
+  auto* cache = mFontTableCache.exchange(nullptr);
+  delete cache;
+}
 
 static bool UsingArabicOrHebrewScriptSystemLocale() {
   LANGID langid = PRIMARYLANGID(::GetSystemDefaultLangID());
@@ -508,6 +511,18 @@ hb_blob_t* gfxDWriteFontEntry::GetFontTable(uint32_t aTag) {
   }
 
   return nullptr;
+}
+
+gfxFontEntry::FontTableCache* gfxDWriteFontEntry::GetFontTableCache(
+    bool aCreate) {
+  // Create the cache if it does not yet exist.
+  if (!mFontTableCache && aCreate) {
+    auto* cache = new FontTableCache();
+    if (!mFontTableCache.compareExchange(nullptr, cache)) {
+      delete cache;
+    }
+  }
+  return mFontTableCache;
 }
 
 nsresult gfxDWriteFontEntry::ReadCMAP(FontInfoData* aFontInfoData) {
@@ -1553,7 +1568,7 @@ void gfxDWriteFontList::InitSharedFontListForPlatform() {
   if (FAILED(hr)) {
     Telemetry::Accumulate(Telemetry::DWRITEFONT_INIT_PROBLEM,
                           uint32_t(errGDIInterop));
-    mSharedFontList.reset(nullptr);
+    delete mSharedFontList.exchange(nullptr);
     return;
   }
 
@@ -1562,7 +1577,7 @@ void gfxDWriteFontList::InitSharedFontListForPlatform() {
   if (!mSystemFonts) {
     Telemetry::Accumulate(Telemetry::DWRITEFONT_INIT_PROBLEM,
                           uint32_t(errSystemFontCollection));
-    mSharedFontList.reset(nullptr);
+    delete mSharedFontList.exchange(nullptr);
     return;
   }
 #ifdef MOZ_BUNDLED_FONTS

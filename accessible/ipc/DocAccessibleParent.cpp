@@ -113,6 +113,10 @@ mozilla::ipc::IPCResult DocAccessibleParent::RecvShowEvent(
 #endif
     }
 
+    if (parent->IsOuterDoc()) {
+      return IPC_FAIL(this, "Cannot attach non-doc to OuterDoc");
+    }
+
     uint32_t childIdx = accData.IndexInParent();
     if (childIdx > parent->ChildCount()) {
       NS_ERROR("invalid index to add child at");
@@ -206,6 +210,11 @@ mozilla::ipc::IPCResult DocAccessibleParent::RecvShowEvent(
 
 RemoteAccessible* DocAccessibleParent::CreateAcc(
     const AccessibleData& aAccData) {
+  if (aAccData.ID() == 0) {
+    MOZ_ASSERT_UNREACHABLE("An ID of 0 is reserved for the document itself");
+    return nullptr;
+  }
+
   RemoteAccessible* newProxy;
   if ((newProxy = GetAccessible(aAccData.ID()))) {
     // This is a move. Reuse the Accessible; don't destroy it.
@@ -859,6 +868,10 @@ mozilla::ipc::IPCResult DocAccessibleParent::RecvBindChildDoc(
   MOZ_ASSERT(CheckDocTree());
 
   auto childDoc = static_cast<DocAccessibleParent*>(aChildDoc.get());
+  if (childDoc->IsShutdown()) {
+    return IPC_FAIL(this, "Attempt to bind a shutdown child doc");
+  }
+
   ipc::IPCResult result = AddChildDoc(childDoc, aID, false);
   MOZ_ASSERT(result);
   MOZ_ASSERT(CheckDocTree());
@@ -876,6 +889,10 @@ mozilla::ipc::IPCResult DocAccessibleParent::RecvBindChildDoc(
 ipc::IPCResult DocAccessibleParent::AddChildDoc(DocAccessibleParent* aChildDoc,
                                                 uint64_t aParentID,
                                                 bool aCreating) {
+  if (aChildDoc->IsShutdown()) {
+    return IPC_FAIL(this, "Attempt to add a shutdown child doc");
+  }
+
   // We do not use GetAccessible here because we want to be sure to not get the
   // document it self.
   ProxyEntry* e = mAccessibles.GetEntry(aParentID);
@@ -977,6 +994,8 @@ void DocAccessibleParent::Destroy() {
   // If we are already shutdown that is because our containing tab parent is
   // shutting down in which case we don't need to do anything.
   if (mShutdown) {
+    // Just in case there is a cycle in the document heirarchy.
+    SetParent(nullptr);
     return;
   }
 
@@ -1058,6 +1077,9 @@ void DocAccessibleParent::ActorDestroy(ActorDestroyReason aWhy) {
   if (!mShutdown) {
     ACQUIRE_ANDROID_LOCK
     Destroy();
+  } else if (!IsTopLevel()) {
+    ACQUIRE_ANDROID_LOCK
+    Unbind();
   }
 }
 

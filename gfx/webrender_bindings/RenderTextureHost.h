@@ -61,6 +61,11 @@ class RenderTextureHost {
 
   virtual void UnlockSWGL() {}
 
+  virtual bool LockSWGLCompositeSurface(void* aContext,
+                                        wr::SWGLCompositeSurfaceInfo* aInfo) {
+    return false;
+  }
+
   virtual void ClearCachedResources() {}
 
   // Called asynchronouly when corresponding TextureHost's mCompositableCount
@@ -114,6 +119,11 @@ class RenderTextureHost {
 
   virtual void Destroy();
 
+  void SetDestroyedCallback(std::function<void()>&& aDestroyedCallback) {
+    MOZ_ASSERT(!mDestroyedCallback);
+    mDestroyedCallback = std::move(aDestroyedCallback);
+  }
+
  protected:
   virtual ~RenderTextureHost();
 
@@ -125,6 +135,7 @@ class RenderTextureHost {
       gfx::IntSize aTextureSize) const;
 
   bool mIsFromDRMSource;
+  std::function<void()> mDestroyedCallback;
 
   friend class RenderTextureHostWrapper;
 };
