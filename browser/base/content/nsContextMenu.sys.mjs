@@ -35,6 +35,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { upcheck } from "resource://gre/modules/upcheck.sys.mjs";
+import { PdfjsContextMenu } from "resource://pdf.js/PdfjsContextMenu.sys.mjs";
 
 ChromeUtils.defineLazyGetter(lazy, "ReferrerInfo", () =>
   Components.Constructor(
@@ -55,13 +56,6 @@ XPCOMUtils.defineLazyPreferenceGetter(
   lazy,
   "STRIP_ON_SHARE_ENABLED",
   "privacy.query_stripping.strip_on_share.enabled",
-  false
-);
-
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "PDFJS_ENABLE_COMMENT",
-  "pdfjs.enableComment",
   false
 );
 
@@ -216,7 +210,6 @@ export class nsContextMenu {
     this.isDesignMode = context.isDesignMode;
     this.inFrame = context.inFrame;
     this.inPDFViewer = context.inPDFViewer;
-    this.inPDFEditor = context.inPDFEditor;
     this.inSrcdocFrame = context.inSrcdocFrame;
     this.inSyntheticDoc = context.inSyntheticDoc;
     this.inTabBrowser = context.inTabBrowser;
@@ -249,8 +242,6 @@ export class nsContextMenu {
     this.onSpellcheckable = context.onSpellcheckable;
     this.onTextInput = context.onTextInput;
     this.onVideo = context.onVideo;
-
-    this.pdfEditorStates = context.pdfEditorStates;
 
     this.target = context.target;
     this.targetIdentifier = context.targetIdentifier;
@@ -332,6 +323,8 @@ export class nsContextMenu {
 
     this.hasTextFragments = context.hasTextFragments;
     this.textFragmentURL = null;
+
+    this.pdfjsContextMenu = new PdfjsContextMenu(this, context);
   } // setContext
 
   hiding(aXulMenu) {
@@ -375,8 +368,8 @@ export class nsContextMenu {
     this.initViewSourceItems();
     this.initScreenshotItem();
     this.initPasswordControlItems();
-    this.initPDFItems();
     this.initTextFragmentItems();
+    this.pdfjsContextMenu.initItems();
 
     this.showHideSeparators(aXulMenu);
     if (!aXulMenu.showHideSeparators) {
@@ -387,71 +380,6 @@ export class nsContextMenu {
         this.showHideSeparators(aXulMenu);
       };
     }
-  }
-
-  initPDFItems() {
-    for (const id of [
-      "context-pdfjs-undo",
-      "context-pdfjs-redo",
-      "context-sep-pdfjs-redo",
-      "context-pdfjs-cut",
-      "context-pdfjs-copy",
-      "context-pdfjs-paste",
-      "context-pdfjs-delete",
-      "context-pdfjs-selectall",
-      "context-sep-pdfjs-selectall",
-    ]) {
-      this.showItem(id, this.inPDFEditor);
-    }
-
-    const hasSelectedText = this.pdfEditorStates?.hasSelectedText ?? false;
-    this.showItem(
-      "context-pdfjs-comment-selection",
-      lazy.PDFJS_ENABLE_COMMENT && hasSelectedText
-    );
-    this.showItem("context-pdfjs-highlight-selection", hasSelectedText);
-
-    if (!this.inPDFEditor) {
-      return;
-    }
-
-    const {
-      isEmpty,
-      hasSomethingToUndo,
-      hasSomethingToRedo,
-      hasSelectedEditor,
-    } = this.pdfEditorStates;
-
-    const hasEmptyClipboard = !Services.clipboard.hasDataMatchingFlavors(
-      ["application/pdfjs"],
-      Ci.nsIClipboard.kGlobalClipboard
-    );
-
-    this.setItemAttr("context-pdfjs-undo", "disabled", !hasSomethingToUndo);
-    this.setItemAttr("context-pdfjs-redo", "disabled", !hasSomethingToRedo);
-    this.setItemAttr(
-      "context-sep-pdfjs-redo",
-      "disabled",
-      !hasSomethingToUndo && !hasSomethingToRedo
-    );
-    this.setItemAttr(
-      "context-pdfjs-cut",
-      "disabled",
-      isEmpty || !hasSelectedEditor
-    );
-    this.setItemAttr(
-      "context-pdfjs-copy",
-      "disabled",
-      isEmpty || !hasSelectedEditor
-    );
-    this.setItemAttr("context-pdfjs-paste", "disabled", hasEmptyClipboard);
-    this.setItemAttr(
-      "context-pdfjs-delete",
-      "disabled",
-      isEmpty || !hasSelectedEditor
-    );
-    this.setItemAttr("context-pdfjs-selectall", "disabled", isEmpty);
-    this.setItemAttr("context-sep-pdfjs-selectall", "disabled", isEmpty);
   }
 
   initTextFragmentItems() {
@@ -568,6 +496,10 @@ export class nsContextMenu {
     let showContainers =
       Services.prefs.getBoolPref("privacy.userContext.enabled") &&
       lazy.ContextualIdentityService.getPublicIdentities().length;
+    let showSplitViews = Services.prefs.getBoolPref(
+      "browser.tabs.splitView.enabled"
+    );
+    let currentTabInSplitView = !!window.gBrowser?.selectedTab?.splitview;
     this.showItem("context-openlink", shouldShow && !isWindowPrivate);
     this.showItem(
       "context-openlinkprivate",
@@ -584,6 +516,11 @@ export class nsContextMenu {
       "context-previewlink",
       lazy.LinkPreview.shouldShowContextMenu(this)
     );
+    let isHiddenTab = !!window.gBrowser?.getTabForBrowser(this.browser)?.hidden;
+    this.showItem(
+      "context-openlinkinsplitview",
+      shouldShow && showSplitViews && !currentTabInSplitView && !isHiddenTab
+    );
   }
 
   initNavigationItems() {
@@ -595,7 +532,8 @@ export class nsContextMenu {
         this.onCanvas ||
         this.onVideo ||
         this.onAudio ||
-        this.onTextInput
+        this.onTextInput ||
+        this.window.browsingContext.isDocumentPiP
       ) && this.inTabBrowser;
     if (AppConstants.platform == "macosx") {
       for (let id of [
@@ -764,10 +702,7 @@ export class nsContextMenu {
     this.showItem("context-viewimage", showViewImage || showBGImage);
 
     // Save image depends on having loaded its content.
-    this.showItem(
-      "context-saveimage",
-      (this.onLoadedImage || this.onCanvas) && !this.inPDFEditor
-    );
+    this.showItem("context-saveimage", this.onLoadedImage || this.onCanvas);
 
     if (Services.policies.status === Services.policies.ACTIVE) {
       // When file pickers are disallowed by enterprise policy,
@@ -864,14 +799,15 @@ export class nsContextMenu {
         lazy.gPrintEnabled
     );
 
-    var shouldShow = !(
+    var showViewSource = !(
       this.isContentSelected ||
       this.onImage ||
       this.onCanvas ||
       this.onVideo ||
       this.onAudio ||
       this.onLink ||
-      this.onTextInput
+      this.onTextInput ||
+      this.window.browsingContext.isDocumentPiP
     );
 
     var showInspect =
@@ -890,7 +826,7 @@ export class nsContextMenu {
         // through normal use, and we've passed an ESR cycle (91).
         lazy.DevToolsShim.isDevToolsUser());
 
-    this.showItem("context-viewsource", shouldShow);
+    this.showItem("context-viewsource", showViewSource);
     this.showItem("context-inspect", showInspect);
 
     this.showItem("context-inspect-a11y", showInspectA11Y);
@@ -917,7 +853,8 @@ export class nsContextMenu {
         this.onVideo ||
         this.onAudio ||
         this.onCanvas ||
-        this.inWebExtBrowser
+        this.inWebExtBrowser ||
+        this.window.browsingContext.isDocumentPiP
       )
     );
 
@@ -1051,8 +988,7 @@ export class nsContextMenu {
         this.onImage ||
         this.onVideo ||
         this.onAudio ||
-        this.inSyntheticDoc ||
-        this.inPDFEditor
+        this.inSyntheticDoc
       ) || this.isDesignMode
     );
 
@@ -1564,6 +1500,29 @@ export class nsContextMenu {
     );
   }
 
+  // Open linked-to URL in a new split view
+  openLinkInSplitView() {
+    let win = this.window;
+    let currentTab = win.gBrowser.getTabForBrowser(this.browser);
+    let userContextId = currentTab ? currentTab.userContextId : 0;
+    let params = {
+      userContextId,
+      ...this._getGlobalHistoryOptions(),
+      inBackground: false,
+      resolveOnNewTabCreated: browser => {
+        let linkTab = win.gBrowser.getTabForBrowser(browser);
+        if (linkTab && currentTab) {
+          win.gBrowser.addTabSplitView([currentTab, linkTab], {
+            insertBefore: currentTab,
+          });
+          win.gBrowser.selectedTab = linkTab;
+        }
+      },
+    };
+
+    win.openLinkIn(this.linkURL, "tab", this._openLinkInParameters(params));
+  }
+
   // open URL in current tab
   openLinkInCurrent() {
     this.window.openLinkIn(
@@ -1618,24 +1577,6 @@ export class nsContextMenu {
       "menuitem-screenshot",
       "ContextMenu"
     );
-  }
-
-  pdfJSCmd(aName) {
-    if (["cut", "copy", "paste"].includes(aName)) {
-      const cmd = `cmd_${aName}`;
-      this.document.commandDispatcher
-        .getControllerForCommand(cmd)
-        .doCommand(cmd);
-      if (Cu.isInAutomation) {
-        this.browser.sendMessageToActor(
-          "PDFJS:Editing",
-          { name: aName },
-          "Pdfjs"
-        );
-      }
-      return;
-    }
-    this.browser.sendMessageToActor("PDFJS:Editing", { name: aName }, "Pdfjs");
   }
 
   // View Partial Source
